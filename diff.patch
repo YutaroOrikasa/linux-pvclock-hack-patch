@@ -1,0 +1,169 @@
+diff '--exclude=*.[od]' '--exclude=*.cmd' -u -r
+linux-4.7/arch/x86/kernel/kvmclock.c
+/arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/arch/x86/kernel/kvmclock.c
+--- linux-4.7/arch/x86/kernel/kvmclock.c 2016-07-25 04:23:50.000000000
++0900 +++
+/arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/arch/x86/kernel/kvmclock.c
+2016-11-08 07:48:38.114100334 +0900 @@ -49,6 +49,7 @@ { return
+hv_clock; } +EXPORT_SYMBOL(pvclock_pvti_cpu0_va);
+ 
+ /*
+  * The wallclock is the time of day when we booted. Since then, some time may
+@@ -79,6 +80,49 @@
+ 	return -1;
+ }
+ 
++// HACK
++cycle_t extra_cycle;
++EXPORT_SYMBOL(extra_cycle);
++#include <linux/stacktrace.h>
++
++#define HOW_MANY_ENTRIES_TO_STORE 50
++#define HOW_MANY_TRACE_TO_STORE 256
++
++static unsigned long stack_entries[HOW_MANY_TRACE_TO_STORE][HOW_MANY_ENTRIES_TO_STORE];
++static struct stack_trace traces[HOW_MANY_TRACE_TO_STORE] = {{0}};
++static int used_trace_num;
++
++struct stack_trace* get_kvm_clock_read_trace(int* num)
++{
++	if (num) {
++		*num = used_trace_num;
++	}
++
++	return traces;
++}
++EXPORT_SYMBOL(get_kvm_clock_read_trace);
++
++void reset_traces(void)
++{
++	int idx;
++	for (idx = 0; idx < HOW_MANY_TRACE_TO_STORE; idx++) {
++		traces[idx].nr_entries = 0;
++	}
++	used_trace_num = 0;
++}
++EXPORT_SYMBOL(reset_traces);
++
++static void init_traces(void)
++{
++
++	int idx;
++	for (idx = 0; idx < HOW_MANY_TRACE_TO_STORE; idx++) {
++		traces[idx].max_entries = HOW_MANY_ENTRIES_TO_STORE;
++		traces[idx].entries = &stack_entries[idx][0];
++	}
++
++}
++
+ static cycle_t kvm_clock_read(void)
+ {
+ 	struct pvclock_vcpu_time_info *src;
+@@ -90,6 +134,13 @@
+ 	src = &hv_clock[cpu].pvti;
+ 	ret = pvclock_clocksource_read(src);
+ 	preempt_enable_notrace();
++
++	 // HACK
++	 ret += extra_cycle;
++	 if (used_trace_num < HOW_MANY_TRACE_TO_STORE) {
++	 	int idx = used_trace_num++;
++	 	save_stack_trace(&traces[idx]);
++	 }
+ 	return ret;
+ }
+ 
+@@ -252,6 +303,9 @@
+ 	int size, cpu;
+ 	u8 flags;
+ 
++	 // HACK
++	 init_traces();
++        
+ 	size = PAGE_ALIGN(sizeof(struct pvclock_vsyscall_time_info)*NR_CPUS);
+ 
+ 	if (!kvm_para_available())
+diff '--exclude=*.[od]' '--exclude=*.cmd' -u -r linux-4.7/kernel/time/clocksource.c /arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/kernel/time/clocksource.c
+--- linux-4.7/kernel/time/clocksource.c	2016-07-25 04:23:50.000000000 +0900
++++ /arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/kernel/time/clocksource.c	2016-11-04 21:06:01.140030560 +0900
+@@ -121,6 +121,13 @@
+ static int clocksource_watchdog_kthread(void *data);
+ static void __clocksource_change_rating(struct clocksource *cs, int rating);
+ 
++
++struct list_head* get_clocksource_list(void)
++{
++	return &clocksource_list;
++}
++EXPORT_SYMBOL(get_clocksource_list);
++
+ /*
+  * Interval: 0.5sec Threshold: 0.0625s
+  */
+diff '--exclude=*.[od]' '--exclude=*.cmd' -u -r linux-4.7/kernel/time/tick-sched.c /arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/kernel/time/tick-sched.c
+--- linux-4.7/kernel/time/tick-sched.c	2016-07-25 04:23:50.000000000 +0900
++++ /arch64-dev/2016-11-17-003550/home/yutaro/linux-kernel/4.7/linux/src/linux-4.7/kernel/time/tick-sched.c	2016-11-07 09:31:19.529847501 +0900
+@@ -46,20 +46,40 @@
+  */
+ static ktime_t last_jiffies_update;
+ 
++/****** my hacking ******/
++/* 0 = false, 1 = ture */
++static char logging_tick_do_update_jiffies64;
++void set_logging_tick_do_update_jiffies64(char bool) {
++	logging_tick_do_update_jiffies64 = bool;
++}
++EXPORT_SYMBOL(set_logging_tick_do_update_jiffies64);
++
++#include <linux/jiffies.h>
++/****** end my hacking ******/
++
+ /*
+  * Must be called with interrupts disabled !
+  */
+ static void tick_do_update_jiffies64(ktime_t now)
+ {
+ 	unsigned long ticks = 0;
+-	ktime_t delta;
++	ktime_t delta, delta_;
+ 
++	 // HACK
++	 u64 old_jiffies_64 = get_jiffies_64();
+ 	/*
+ 	 * Do a quick check without holding jiffies_lock:
+ 	 */
+-	delta = ktime_sub(now, last_jiffies_update);
+-	if (delta.tv64 < tick_period.tv64)
+-		return;
++	delta_ = delta = ktime_sub(now, last_jiffies_update);
++	// HACK
++	if (delta.tv64 < tick_period.tv64) {
++		if (logging_tick_do_update_jiffies64) {
++			printk("tick_do_update_jiffies64: now %llx jiffies_64 %llx old_jiffies_64 %llx last_jiffies_update: %llx delta %llx tick_period %llx skip update\n",
++				now.tv64, old_jiffies_64, old_jiffies_64, last_jiffies_update.tv64, delta.tv64, tick_period.tv64);
++			printk("tick_do_update_jiffies64: skip update at now %llx\n", now.tv64);
++	   }
++	   return;
++	 }
+ 
+ 	/* Reevalute with jiffies_lock held */
+ 	write_seqlock(&jiffies_lock);
+@@ -86,10 +106,18 @@
+ 		tick_next_period = ktime_add(last_jiffies_update, tick_period);
+ 	} else {
+ 		write_sequnlock(&jiffies_lock);
++		printk("tick_do_update_jiffies64: someone update jifies. skip update at now %llx\n", now.tv64);
+ 		return;
+ 	}
+ 	write_sequnlock(&jiffies_lock);
+ 	update_wall_time();
++
++	 // HACK
++	 if (logging_tick_do_update_jiffies64) {
++	 	printk("tick_do_update_jiffies64: now %llx jiffies_64 %llx old_jiffies_64 %llx last_jiffies_update: %llx delta %llx tick_period %llx updated!\n",
++			now.tv64, get_jiffies_64(), old_jiffies_64, last_jiffies_update.tv64, delta_.tv64, tick_period.tv64);
++	}
++
+ }
+ 
+ /*
